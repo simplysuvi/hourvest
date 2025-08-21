@@ -67,7 +67,7 @@
      *   1) Config / Utilities
      *  ======================== */
     const CURRENCY_RE =
-        /(?:^|[\s(])((?:USD|EUR|GBP|CAD|AUD|JPY|INR|[$€£¥₹]))\s*([0-9]{1,3}(?:[,\u202F\u00A0][0-9]{2,3})*(?:[.,][0-9]{2})?|[0-9]+(?:[.,][0-9]{2})?)/gi;
+        /(?:^|[\s(])((?:USD|EUR|GBP|CAD|AUD|JPY|INR|[$€£¥₹]))\s*([0-9]{1,3}(?:[,\u202F\u00A0][0-9]{2,3})*(?:[.,][0-9]{2})?|[0-9]+(?:[.,][0-9]{2})?)(?:\s?(k|m|b|bn|mm|mn))?\b/gi;
     const QUICK_SCAN_RE = /(\$|£|€|¥|₹|USD|EUR|GBP|CAD|AUD|JPY|INR)\s*\d/;
 
     function clamp(val, min, max) { return Math.max(min, Math.min(max, val)); }
@@ -524,12 +524,22 @@
 
             // Fast-path: bail if no currency token nearby
             const sample = target.textContent.slice(0, 2000);
-            if (!QUICK_SCAN_RE.test(sample)) return;
+            if (!QUICK_SCAN_RE.test(sample)) {
+                // no currency at all in target → hide tooltip if previously showing
+                if (this._lastHit) {
+                    this._lastHit = null;
+                    tooltip.hide();
+                    debug.clearMark();
+                }
+                return;
+            }
 
             // Walk visible text nodes only
             const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT, null);
             let node;
             let checked = 0, MAX = 80; // cap work per frame
+            let found = false;
+
             while ((node = walker.nextNode())) {
                 perf.nodesChecked = ++checked;
                 if (checked > MAX) break;
@@ -551,10 +561,19 @@
                             rect: hit.rect.toJSON?.() ?? hit.rect
                         });
                     }
-                    return;
+                    found = true;
+                    break;
                 }
             }
+
+            // NEW: if no hit was found in this scan, clear tooltip
+            if (!found && this._lastHit) {
+                this._lastHit = null;
+                tooltip.hide();
+                debug.clearMark();
+            }
         },
+
 
         _hitInNode(node, x, y) {
             const text = node.textContent;
@@ -562,6 +581,7 @@
             let m;
             while ((m = CURRENCY_RE.exec(text))) {
                 const amountStr = m[2];
+                const suffix = m[3];
                 if (!amountStr) continue;
 
                 // Re-find exact substring window for safe offsets (handles duplicates)
@@ -588,7 +608,7 @@
                     : range.commonAncestorContainer.parentElement;
                 if (anchorEl && hasStrikeThrough(anchorEl)) continue;
 
-                const price = this._parseAmount(amountStr);
+                const price = this._parseAmount(amountStr, suffix);
                 if (isNaN(price) || price <= 0) continue;
 
                 return { rect, price };
@@ -596,7 +616,7 @@
             return null;
         },
 
-        _parseAmount(raw) {
+        _parseAmount(raw, suffix) {
             // Remove thin spaces / NBSP
             let s = (raw || '').replace(/[\u202F\u00A0]/g, '');
             const hasDot = s.includes('.');
@@ -609,7 +629,6 @@
                     s = s.replace(/\./g, '').replace(',', '.'); // comma decimal
                 }
             } else if (hasComma) {
-                // If it looks like a decimal (two digits after comma), treat as decimal
                 const parts = s.split(',');
                 if (parts.length === 2 && parts[1].length === 2) {
                     s = parts[0].replace(/,/g, '') + '.' + parts[1];
@@ -622,7 +641,21 @@
             s = s.replace(/[^0-9.]/g, '');
             const num = parseFloat(s);
             if (debug.enabled) debug.info('parseAmount', { raw, normalized: s, num });
-            return Number.isFinite(num) ? num : NaN;
+            if (!Number.isFinite(num)) return NaN;
+
+            // NEW: apply suffix multiplier
+            let mult = 1;
+            if (suffix) {
+                switch (suffix.toLowerCase()) {
+                    case 'k': mult = 1e3; break;
+                    case 'm':
+                    case 'mm':
+                    case 'mn': mult = 1e6; break;
+                    case 'b':
+                    case 'bn': mult = 1e9; break;
+                }
+            }
+            return num * mult;
         },
 
         _pointInRect(x, y, r, tol = 2) {
